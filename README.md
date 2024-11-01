@@ -12,14 +12,17 @@ This negatively affects the `pext` and `avx512` functions the most.
 For the sake of having no dependencies and keeping it within one file, I've compromised on the testing and benchmark code.
 
 # How to use
+LLVM won't (or is much less likely to) inline the unsafe fns unless you build with the features enabled.
+Easiest thing is to use the 'native' target. However, sometimes LLVM's metadata is outdated and it won't recognize
+your CPU (it will underestimate its capabilities).
 
 ```
-cargo run --release
+RUSTFLAGS="-Ctarget-cpu=native" cargo run --release
 ```
 
 or
 
 ```
-rustc -Copt-level=3 ./src/main.rs
+rustc -Copt-level=3 -Ctarget-cpu=native ./src/main.rs
 ./main
 ```

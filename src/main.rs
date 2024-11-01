@@ -175,26 +175,7 @@ unsafe fn to_id_other_avx512_16(input: &[u8; 16]) -> ([u8; 16], u8) {
     )
 }
 
-type FnLabel = &'static str;
 type CompatTestFn = fn() -> bool;
-type ToID16Fn = unsafe fn(&[u8; 16]) -> ([u8; 16], u8);
-
-/// The functions to benchmark
-static BENCH_CASES: &[(FnLabel, CompatTestFn, ToID16Fn)] = &[
-    ("scalar match", || true, to_id_match_16),
-    ("scalar table-128", || true, to_id_table_16),
-    ("scalar table-256", || true, to_id_full_table_16),
-    ("pext", can_run_pext_16, to_id_pext_16),
-    ("AVX512 Blend", can_run_avx512_16, to_id_avx512_16),
-    ("AVX512 LUT", can_run_other_avx512_16, to_id_other_avx512_16),
-    // Sometimes test order can influence performance
-    ("pext", can_run_pext_16, to_id_pext_16),
-    ("scalar match", || true, to_id_match_16),
-    ("scalar table-256", || true, to_id_full_table_16),
-    ("scalar table-128", || true, to_id_table_16),
-    ("AVX512 Blend", can_run_avx512_16, to_id_avx512_16),
-    ("AVX512 LUT", can_run_other_avx512_16, to_id_other_avx512_16),
-];
 
 /// Stages of the benchmark. Order dependent
 static BENCH_MODES: &[(&'static str, fn(&mut Vec<[u8; 16]>))] = &[
@@ -227,6 +208,26 @@ fn fxhash(h: u64, w: u64) -> u64 {
 fn main() {
     use std::{hint::black_box, time::Instant};
 
+    #[inline(never)]
+    fn bench(
+        fn_label: &str,
+        compat_test: CompatTestFn,
+        to_id_fn: impl Fn(&[u8; 16]) -> ([u8; 16], u8),
+        inputs: &[[u8; 16]],
+    ) {
+        if !compat_test() {
+            println!("--Skipping '{fn_label}' because of missing CPU features");
+            return;
+        }
+        let start = Instant::now();
+        for chunk in inputs {
+            black_box(to_id_fn(chunk));
+        }
+        let duration = start.elapsed();
+        let average = duration / inputs.len() as u32;
+        println!("{fn_label:<18}: {average:?}");
+    }
+
     let num_iters = 10_000_000u32;
     // very crappy means of generating random input
     let mut inputs = Vec::<[u8; 16]>::with_capacity(num_iters as usize);
@@ -245,20 +246,27 @@ fn main() {
     for (mode_label, input_prep_fn) in BENCH_MODES {
         println!("\n\tStarting '{mode_label}'");
         input_prep_fn(&mut inputs);
-        for (fn_label, feature_test, to_id_fn) in BENCH_CASES {
-            if !feature_test() {
-                println!("--Skipping '{fn_label}' because of missing CPU features");
-                continue;
-            }
-
-            let start = Instant::now();
-            for chunk in &inputs {
-                unsafe { black_box(to_id_fn(chunk)) };
-            }
-            let duration = start.elapsed();
-            let average = duration / num_iters;
-            println!("{fn_label:<18}: {average:?}");
-        }
+        bench("scalar match", || true, to_id_match_16, &inputs);
+        bench("scalar table-128", || true, to_id_table_16, &inputs);
+        bench("scalar table-256", || true, to_id_full_table_16, &inputs);
+        bench(
+            "pext",
+            can_run_pext_16,
+            |v| unsafe { to_id_pext_16(v) },
+            &inputs,
+        );
+        bench(
+            "AVX512 Blend",
+            can_run_avx512_16,
+            |v| unsafe { to_id_avx512_16(v) },
+            &inputs,
+        );
+        bench(
+            "AVX512 LUT",
+            can_run_other_avx512_16,
+            |v| unsafe { to_id_other_avx512_16(v) },
+            &inputs,
+        );
     }
 }
 
