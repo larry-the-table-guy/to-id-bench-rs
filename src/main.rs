@@ -160,7 +160,7 @@ unsafe fn to_id_other_avx512_16(input: &[u8; 16]) -> ([u8; 16], u8) {
 
     let b = _mm_loadu_si128(input.as_ptr().cast());
     // which lanes don't have 8th bit set
-    let ascii_mask = !_mm_test_epi8_mask(b, _mm_set1_epi8(-127));
+    let ascii_mask = !_mm_test_epi8_mask(b, _mm_set1_epi8(-128));
     // this is a no-op, just for typing
     let b = _mm512_zextsi128_si512(b);
     let mapped_bytes = _mm512_permutex2var_epi8(low_lut, b, high_lut);
