@@ -4,7 +4,7 @@
 use std::arch::x86_64::*;
 
 // Lowercase + retain [a-z0-9]
-// These doesn't fully handle unicode - it will always remove them (some unicode letters become ascii when lowercased)
+// These don't fully handle unicode - non-ascii bytes will be unconditionally removed (some unicode letters become ascii when lowercased)
 
 fn to_id_match_16(input: &[u8; 16]) -> ([u8; 16], u8) {
     let mut bytes = [0u8; 16];
