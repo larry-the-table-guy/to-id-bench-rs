@@ -3,7 +3,7 @@ A small benchmark comparing several approaches to `toID` on fixed-length strings
 Why fixed-length strings? Well, I've found that when you want a system that deals with many small strings to be fast,
 it can really help to customize your string representation. Having fixed-length inline strings removes a level of
 indirection and potentially many branches. In 64bit Rust programs, string slices (`&str`) take 16 bytes anyway.
-Of course, this approach would require a separate path for large strings; depending on the problem, that may not turn out to be very much code.
+Of course, this approach would require a separate path for large strings; depending on the problem, that may turn out to not be very much code.
 
 In practice, you'd want this function inlined in the hot loop, and possibly running on batches of strings.
 That's the scenario the benchmark tests.
@@ -27,16 +27,19 @@ rustc -Copt-level=3 -Ctarget-cpu=native ./src/main.rs
 ```
 
 # My Results
-W/ `target-cpu=native`. Time in `ns`. Precision isn't great.
+W/ `target-cpu=native`. Throughput in `million strings / second`.
+
+Obviously, in practice you won't have such large batches, but this is still
+demonstrative of which algos are faster, and what the potential is.
 
 ## 9th Gen Intel
 
 | Fn | Binary | Ascii | Alphanum |
 | -- | ------ | ----- | -------- |
-| scalar match | 24 | 24 | 26 |
-| scalar table-128 | 52 | 12 | 12 |
-| scalar table-256 | 8 | 8 | 8 |
-| pext | 5 | 5 | 4 |
+| scalar match | 48 | 48 | 48 |
+| scalar table-128 | 15 | 60 | 60 |
+| scalar table-256 | 111 | 109 | 111 |
+| pext | 167 | 167 | 165 |
 | AVX512 Blend | - | - | - |
 | AVX512 LUT | - | - | - |
 
@@ -44,16 +47,9 @@ W/ `target-cpu=native`. Time in `ns`. Precision isn't great.
 
 | Fn | Binary | Ascii | Alphanum |
 | -- | ------ | ----- | -------- |
-| scalar match | 14 | 12 | 12 |
-| scalar table-128 | 42 | 6 | 6 |
-| scalar table-256 | 6 | 5 | 5 |
-| pext | 4 | 4 | 2 |
-| AVX512 Blend | 0 | 0 | 0 |
-| AVX512 LUT | 0 | 0 | 0 |
-
-Obviously, it's pretty unreasonable for the AVX512 variants to be under 1 ns.
-I suspect that the CPU is recognizing that each write will dominate the last write,
-and some spec exec / instruction reordering shenanigans are afoot.
-On the other hand, with 5+ GHz, 4-6 IPC *and* a large reorder buffer, it could just be the CPU being really fast and pipelining across function calls...
-
-I'll look at changing the benchmark to write the outputs into a small buffer.
+| scalar match | 69 | 80 | 80 |
+| scalar table-128 | 22 | 123 | 124 |
+| scalar table-256 | 147 | 169 | 170 |
+| pext | 212 | 226 | 222 |
+| AVX512 Blend | 1010 | 1015 | 1016 |
+| AVX512 LUT | 1396 | 1379 | 1347 |
