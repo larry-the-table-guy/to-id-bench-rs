@@ -6,8 +6,7 @@ indirection and potentially many branches. In 64bit Rust programs, string slices
 Of course, this approach would require a separate path for large strings; depending on the problem, that may not turn out to be very much code.
 
 In practice, you'd want this function inlined in the hot loop, and possibly running on batches of strings.
-In the current state, constants are loaded on every call. That increases the function size and adds several cycles of latency.
-This negatively affects the `pext` and `avx512` functions the most.
+That's the scenario the benchmark tests.
 
 For the sake of having no dependencies and keeping it within one file, I've compromised on the testing and benchmark code.
 

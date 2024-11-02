@@ -215,13 +215,17 @@ fn main() {
         to_id_fn: impl Fn(&[u8; 16]) -> ([u8; 16], u8),
         inputs: &[[u8; 16]],
     ) {
+        let mut out_buf = [std::mem::MaybeUninit::<[u8; 16]>::uninit(); 1000];
         if !compat_test() {
             println!("--Skipping '{fn_label}' because of missing CPU features");
             return;
         }
         let start = Instant::now();
-        for chunk in inputs {
-            black_box(to_id_fn(chunk));
+        for chunks in inputs.chunks_exact(out_buf.len()) {
+            for (in_chunk, out_chunk) in chunks.iter().zip(out_buf.iter_mut()) {
+                out_chunk.write(to_id_fn(in_chunk).0);
+            }
+            black_box(out_buf);
         }
         let duration = start.elapsed();
         let average = duration / inputs.len() as u32;
