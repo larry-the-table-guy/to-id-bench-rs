@@ -227,9 +227,9 @@ fn main() {
             }
             black_box(out_buf);
         }
-        let duration = start.elapsed();
-        let average = duration / inputs.len() as u32;
-        println!("{fn_label:<18}: {average:?}");
+        let duration = start.elapsed().as_secs_f64();
+        let thrpt = inputs.len() as f64 / duration / 1_000_000.;
+        println!("{fn_label:<18}: {thrpt:>7.2} M/s");
     }
 
     let num_iters = 10_000_000u32;
