@@ -74,7 +74,6 @@ fn to_id_full_table_16(input: &[u8; 16]) -> ([u8; 16], u8) {
 
 #[cfg(target_arch = "x86_64")]
 mod x86_64 {
-    use crate::ASCII_TABLE;
     use std::arch::x86_64::*;
 
     /// Returns (lowered & filtered bytes, active mask)
@@ -169,6 +168,7 @@ mod x86_64 {
     #[cfg(feature = "nightly")]
     #[target_feature(enable = "popcnt,avx512f,avx512vl,avx512vbmi,avx512vbmi2,avx512bw")]
     pub unsafe fn to_id_other_avx512_16(input: &[u8; 16]) -> ([u8; 16], u8) {
+        use crate::ASCII_TABLE;
         let low_lut = _mm512_loadu_si512(ASCII_TABLE.as_ptr().cast());
         let high_lut = _mm512_loadu_si512(ASCII_TABLE.as_ptr().byte_add(64).cast());
         // use a 128 byte LUT to map bytes. Nonzero bytes are retained.
