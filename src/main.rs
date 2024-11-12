@@ -204,7 +204,9 @@ mod x86_64 {
 
     /// LUT but 4 at a time. Returns a dummy u8 because I am a dummy.
     #[cfg(feature = "nightly")]
-    #[target_feature(enable = "avx512f,avx512vl,avx512vbmi,avx512vbmi2,avx512bw,avx512vpopcntdq,avx512bitalg")]
+    #[target_feature(
+        enable = "avx512f,avx512vl,avx512vbmi,avx512vbmi2,avx512bw,avx512vpopcntdq,avx512bitalg"
+    )]
     pub unsafe fn to_id_avx512_lut_4x16(inputs: &[u8; 64]) -> ([u8; 64], u8) {
         use crate::ASCII_TABLE;
         let low_lut = _mm512_loadu_si512(ASCII_TABLE.as_ptr().cast());
@@ -224,10 +226,67 @@ mod x86_64 {
         let retain_v = _mm_set_epi64x(0, retain_mask as i64);
         let retain_cnt_v = _mm_popcnt_epi16(retain_v);
         // now turn counts into bitmasks (5 -> 0b1_1111)
-        let masks_v = _mm_sub_epi16(_mm_sllv_epi16(_mm_set1_epi16(1), retain_cnt_v), _mm_set1_epi16(1));
+        let masks_v = _mm_sub_epi16(
+            _mm_sllv_epi16(_mm_set1_epi16(1), retain_cnt_v),
+            _mm_set1_epi16(1),
+        );
         let expand_mask = _mm_cvtsi128_si64(masks_v) as u64;
         let slotted_bytes = _mm512_maskz_expand_epi8(expand_mask, packed_bytes);
         (std::mem::transmute(slotted_bytes), 0)
+    }
+
+    #[cfg(feature = "nightly")]
+    pub fn can_run_avx512_lut_8x16() -> bool {
+        is_x86_feature_detected!("popcnt")
+            && is_x86_feature_detected!("avx512f")
+            && is_x86_feature_detected!("avx512bitalg")
+            && is_x86_feature_detected!("avx512bw")
+            && is_x86_feature_detected!("avx512vbmi")
+            && is_x86_feature_detected!("avx512vbmi2")
+            && is_x86_feature_detected!("avx512vl")
+            && is_x86_feature_detected!("avx512vpopcntdq")
+    }
+
+    /// LUT but 8 at a time. Returns a dummy u8 because I am a dummy.
+    #[cfg(feature = "nightly")]
+    #[target_feature(
+        enable = "avx512f,avx512vl,avx512vbmi,avx512vbmi2,avx512bw,avx512vpopcntdq,avx512bitalg"
+    )]
+    pub unsafe fn to_id_avx512_lut_8x16(inputs: &[u8; 128]) -> ([u8; 128], u8) {
+        use crate::ASCII_TABLE;
+        let low_lut = _mm512_loadu_si512(ASCII_TABLE.as_ptr().cast());
+        let high_lut = _mm512_loadu_si512(ASCII_TABLE.as_ptr().byte_add(64).cast());
+        // use a 128 byte LUT to map bytes. Nonzero bytes are retained.
+
+        let b1 = _mm512_loadu_si512(inputs.as_ptr().cast());
+        let b2 = _mm512_loadu_si512(inputs.as_ptr().byte_add(64).cast());
+        // which lanes don't have 8th bit set
+        let ascii_mask1 = !_mm512_test_epi8_mask(b1, _mm512_set1_epi8(-128));
+        let ascii_mask2 = !_mm512_test_epi8_mask(b2, _mm512_set1_epi8(-128));
+        let mapped_bytes1 = _mm512_permutex2var_epi8(low_lut, b1, high_lut);
+        let mapped_bytes2 = _mm512_permutex2var_epi8(low_lut, b2, high_lut);
+        // ignore bytes >= 128 (not ascii), get mask of nonzero bytes
+        let retain_mask1 =
+            _mm512_mask_test_epi8_mask(ascii_mask1, mapped_bytes1, mapped_bytes1) as u64;
+        let retain_mask2 =
+            _mm512_mask_test_epi8_mask(ascii_mask2, mapped_bytes2, mapped_bytes2) as u64;
+        // now, this compress clumps all 4 strings together. We'll need to expand them back into
+        // their rightful places
+        let packed_bytes1 = _mm512_maskz_compress_epi8(retain_mask1, mapped_bytes1);
+        let packed_bytes2 = _mm512_maskz_compress_epi8(retain_mask2, mapped_bytes2);
+        // we need a bitmask for 8x16 - can compute from popcount of each 16-bit quadrant of retain
+        let retains_v = _mm_set_epi64x(retain_mask2 as i64, retain_mask1 as i64);
+        let retain_cnts_v = _mm_popcnt_epi16(retains_v);
+        // now turn counts into bitmasks (5 -> 0b1_1111)
+        let masks_v = _mm_sub_epi16(
+            _mm_sllv_epi16(_mm_set1_epi16(1), retain_cnts_v),
+            _mm_set1_epi16(1),
+        );
+        let expand_mask1 = _mm_cvtsi128_si64(masks_v) as u64;
+        let expand_mask2 = _mm_extract_epi64::<1>(masks_v) as u64;
+        let slotted_bytes1 = _mm512_maskz_expand_epi8(expand_mask1, packed_bytes1);
+        let slotted_bytes2 = _mm512_maskz_expand_epi8(expand_mask2, packed_bytes2);
+        (std::mem::transmute((slotted_bytes1, slotted_bytes2)), 0)
     }
 }
 type CompatTestFn = fn() -> bool;
@@ -332,12 +391,27 @@ fn main() {
                     &inputs,
                 );
                 // turn slice of 16 into 64
-                let inputs_64 = unsafe { std::slice::from_raw_parts(inputs.as_ptr().cast::<[u8; 64]>(), inputs.len() / 4) };
+                let inputs_64 = unsafe {
+                    std::slice::from_raw_parts(inputs.as_ptr().cast::<[u8; 64]>(), inputs.len() / 4)
+                };
                 bench(
                     "AVX512 LUT x 4",
                     can_run_avx512_lut_4x16,
                     |v| unsafe { to_id_avx512_lut_4x16(v) },
                     inputs_64,
+                );
+                // turn slice of 16 into 128
+                let inputs_128 = unsafe {
+                    std::slice::from_raw_parts(
+                        inputs.as_ptr().cast::<[u8; 128]>(),
+                        inputs.len() / 8,
+                    )
+                };
+                bench(
+                    "AVX512 LUT x 8",
+                    can_run_avx512_lut_8x16,
+                    |v| unsafe { to_id_avx512_lut_8x16(v) },
+                    inputs_128,
                 );
             }
         }
