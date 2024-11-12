@@ -1,7 +1,11 @@
-#![feature(avx512_target_feature)]
-#![feature(stdarch_x86_avx512)]
-
-use std::arch::x86_64::*;
+#![cfg_attr(
+    all(feature = "nightly", target_arch = "x86_64"),
+    feature(avx512_target_feature)
+)]
+#![cfg_attr(
+    all(feature = "nightly", target_arch = "x86_64"),
+    feature(stdarch_x86_avx512)
+)]
 
 // Lowercase + retain [a-z0-9]
 // These don't fully handle unicode - non-ascii bytes will be unconditionally removed (some unicode letters become ascii when lowercased)
@@ -68,113 +72,124 @@ fn to_id_full_table_16(input: &[u8; 16]) -> ([u8; 16], u8) {
     (bytes, num_bytes as u8)
 }
 
-/// Returns (lowered & filtered bytes, active mask)
-#[inline(always)]
-unsafe fn lower_and_mask_helper_sse41(input: __m128i) -> (__m128i, __m128i) {
-    use std::arch::x86_64::{
-        _mm_and_si128 as and, _mm_cmpgt_epi8 as cmpgt, _mm_or_si128 as or, _mm_set1_epi8 as set1,
-    };
-    // ideally you'd run this in batches and these constants would get loaded outside the loop
-    // exclusive bc sse doesn't have le, ge
-    let lo_a_v = set1(b'a' as i8 - 1);
-    let lo_z_v = set1(b'z' as i8 + 1);
-    let up_a_v = set1(b'A' as i8 - 1);
-    let up_z_v = set1(b'Z' as i8 + 1);
-    let di_0_v = set1(b'0' as i8 - 1);
-    let di_9_v = set1(b'9' as i8 + 1);
-    let ascii_alpha_lower_bit_v = set1((b'a' - b'A') as i8); // 32
+#[cfg(target_arch = "x86_64")]
+mod x86_64 {
+    use crate::ASCII_TABLE;
+    use std::arch::x86_64::*;
 
-    let chunk = input;
-    // find lower, upper, numbers
-    let lo_mask = and(cmpgt(chunk, lo_a_v), cmpgt(lo_z_v, chunk));
-    let up_mask = and(cmpgt(chunk, up_a_v), cmpgt(up_z_v, chunk));
-    let di_mask = and(cmpgt(chunk, di_0_v), cmpgt(di_9_v, chunk));
-    // lower the upper-case bytes
-    let lowered = _mm_or_si128(chunk, ascii_alpha_lower_bit_v);
-    // there's no masked or for epi8, so blend
-    let chunk = _mm_blendv_epi8(chunk, lowered, up_mask);
-    // keep bytes from those masks. Can do 2 ors in one step w/ vpternlogd
-    let retain_mask = or(or(lo_mask, up_mask), di_mask);
-    (chunk, retain_mask)
+    /// Returns (lowered & filtered bytes, active mask)
+    #[inline(always)]
+    unsafe fn lower_and_mask_helper_sse41(input: __m128i) -> (__m128i, __m128i) {
+        use std::arch::x86_64::{
+            _mm_and_si128 as and, _mm_cmpgt_epi8 as cmpgt, _mm_or_si128 as or,
+            _mm_set1_epi8 as set1,
+        };
+        // ideally you'd run this in batches and these constants would get loaded outside the loop
+        // exclusive bc sse doesn't have le, ge
+        let lo_a_v = set1(b'a' as i8 - 1);
+        let lo_z_v = set1(b'z' as i8 + 1);
+        let up_a_v = set1(b'A' as i8 - 1);
+        let up_z_v = set1(b'Z' as i8 + 1);
+        let di_0_v = set1(b'0' as i8 - 1);
+        let di_9_v = set1(b'9' as i8 + 1);
+        let ascii_alpha_lower_bit_v = set1((b'a' - b'A') as i8); // 32
+
+        let chunk = input;
+        // find lower, upper, numbers
+        let lo_mask = and(cmpgt(chunk, lo_a_v), cmpgt(lo_z_v, chunk));
+        let up_mask = and(cmpgt(chunk, up_a_v), cmpgt(up_z_v, chunk));
+        let di_mask = and(cmpgt(chunk, di_0_v), cmpgt(di_9_v, chunk));
+        // lower the upper-case bytes
+        let lowered = _mm_or_si128(chunk, ascii_alpha_lower_bit_v);
+        // there's no masked or for epi8, so blend
+        let chunk = _mm_blendv_epi8(chunk, lowered, up_mask);
+        // keep bytes from those masks. Can do 2 ors in one step w/ vpternlogd
+        let retain_mask = or(or(lo_mask, up_mask), di_mask);
+        (chunk, retain_mask)
+    }
+
+    pub fn can_run_pext_16() -> bool {
+        is_x86_feature_detected!("popcnt")
+            && is_x86_feature_detected!("bmi2")
+            && is_x86_feature_detected!("sse4.1")
+    }
+
+    #[target_feature(enable = "popcnt,bmi2,sse4.1")]
+    pub unsafe fn to_id_pext_16(input: &[u8; 16]) -> ([u8; 16], u8) {
+        // build mask for pext,
+        // do pexts and concat (by unaligned writes)
+        let chunk = _mm_loadu_si128(input.as_ptr().cast());
+        let (chunk, retain_mask) = lower_and_mask_helper_sse41(chunk);
+        let low_bytes = _mm_extract_epi64::<0>(chunk) as u64;
+        let low_mask = _mm_extract_epi64::<0>(retain_mask) as u64;
+        let high_bytes = _mm_extract_epi64::<1>(chunk) as u64;
+        let high_mask = _mm_extract_epi64::<1>(retain_mask) as u64;
+        let mut packed_bytes = [0u8; 16];
+        let ptr = packed_bytes.as_mut_ptr().cast::<[u8; 8]>();
+        ptr.write(_pext_u64(low_bytes, low_mask).to_le_bytes());
+        ptr.byte_add(low_mask.count_ones() as usize / 8)
+            .write(_pext_u64(high_bytes, high_mask).to_le_bytes());
+        (
+            packed_bytes,
+            _mm_movemask_epi8(retain_mask).count_ones() as u8,
+        )
+    }
+
+    #[cfg(feature = "nightly")]
+    pub fn can_run_avx512_16() -> bool {
+        is_x86_feature_detected!("popcnt")
+            && is_x86_feature_detected!("avx512f")
+            && is_x86_feature_detected!("avx512bw")
+            && is_x86_feature_detected!("avx512vbmi2")
+            && is_x86_feature_detected!("avx512vl")
+    }
+
+    #[cfg(feature = "nightly")]
+    #[target_feature(enable = "popcnt,avx512f,avx512bw,avx512vbmi2,avx512vl")]
+    pub unsafe fn to_id_avx512_16(input: &[u8; 16]) -> ([u8; 16], u8) {
+        let (chunk, retain_mask) =
+            lower_and_mask_helper_sse41(_mm_loadu_si128(input.as_ptr().cast()));
+        let retain_mask = _mm_movemask_epi8(retain_mask) as u16;
+        let num_bytes = retain_mask.count_ones() as u8;
+        let packed_bytes = std::mem::transmute(_mm_maskz_compress_epi8(retain_mask, chunk));
+        (packed_bytes, num_bytes)
+    }
+
+    #[cfg(feature = "nightly")]
+    pub fn can_run_other_avx512_16() -> bool {
+        is_x86_feature_detected!("popcnt")
+            && is_x86_feature_detected!("avx512f")
+            && is_x86_feature_detected!("avx512bw")
+            && is_x86_feature_detected!("avx512vbmi")
+            && is_x86_feature_detected!("avx512vbmi2")
+            && is_x86_feature_detected!("avx512vl")
+    }
+
+    /// use LUT + compress
+    #[cfg(feature = "nightly")]
+    #[target_feature(enable = "popcnt,avx512f,avx512vl,avx512vbmi,avx512vbmi2,avx512bw")]
+    pub unsafe fn to_id_other_avx512_16(input: &[u8; 16]) -> ([u8; 16], u8) {
+        let low_lut = _mm512_loadu_si512(ASCII_TABLE.as_ptr().cast());
+        let high_lut = _mm512_loadu_si512(ASCII_TABLE.as_ptr().byte_add(64).cast());
+        // use a 128 byte LUT to map bytes. Nonzero bytes are retained.
+
+        let b = _mm_loadu_si128(input.as_ptr().cast());
+        // which lanes don't have 8th bit set
+        let ascii_mask = !_mm_test_epi8_mask(b, _mm_set1_epi8(-128));
+        // this is a no-op, just for typing
+        let b = _mm512_zextsi128_si512(b);
+        let mapped_bytes = _mm512_permutex2var_epi8(low_lut, b, high_lut);
+        // cast back down to the 16 actual bytes
+        let mapped_bytes = _mm512_castsi512_si128(mapped_bytes);
+        // ignore bytes >= 128 (not ascii), get mask of nonzero bytes
+        let retain_mask = _mm_mask_test_epi8_mask(ascii_mask, mapped_bytes, mapped_bytes) as u16;
+        let packed_bytes = _mm_maskz_compress_epi8(retain_mask, mapped_bytes);
+        (
+            std::mem::transmute(packed_bytes),
+            retain_mask.count_ones() as u8,
+        )
+    }
 }
-
-fn can_run_pext_16() -> bool {
-    is_x86_feature_detected!("popcnt")
-        && is_x86_feature_detected!("bmi2")
-        && is_x86_feature_detected!("sse4.1")
-}
-
-#[target_feature(enable = "popcnt,bmi2,sse4.1")]
-unsafe fn to_id_pext_16(input: &[u8; 16]) -> ([u8; 16], u8) {
-    // build mask for pext,
-    // do pexts and concat (by unaligned writes)
-    let chunk = _mm_loadu_si128(input.as_ptr().cast());
-    let (chunk, retain_mask) = lower_and_mask_helper_sse41(chunk);
-    let low_bytes = _mm_extract_epi64::<0>(chunk) as u64;
-    let low_mask = _mm_extract_epi64::<0>(retain_mask) as u64;
-    let high_bytes = _mm_extract_epi64::<1>(chunk) as u64;
-    let high_mask = _mm_extract_epi64::<1>(retain_mask) as u64;
-    let mut packed_bytes = [0u8; 16];
-    let ptr = packed_bytes.as_mut_ptr().cast::<[u8; 8]>();
-    ptr.write(_pext_u64(low_bytes, low_mask).to_le_bytes());
-    ptr.byte_add(low_mask.count_ones() as usize / 8)
-        .write(_pext_u64(high_bytes, high_mask).to_le_bytes());
-    (
-        packed_bytes,
-        _mm_movemask_epi8(retain_mask).count_ones() as u8,
-    )
-}
-
-fn can_run_avx512_16() -> bool {
-    is_x86_feature_detected!("popcnt")
-        && is_x86_feature_detected!("avx512f")
-        && is_x86_feature_detected!("avx512bw")
-        && is_x86_feature_detected!("avx512vbmi2")
-        && is_x86_feature_detected!("avx512vl")
-}
-
-#[target_feature(enable = "popcnt,avx512f,avx512bw,avx512vbmi2,avx512vl")]
-unsafe fn to_id_avx512_16(input: &[u8; 16]) -> ([u8; 16], u8) {
-    let (chunk, retain_mask) = lower_and_mask_helper_sse41(_mm_loadu_si128(input.as_ptr().cast()));
-    let retain_mask = _mm_movemask_epi8(retain_mask) as u16;
-    let num_bytes = retain_mask.count_ones() as u8;
-    let packed_bytes = std::mem::transmute(_mm_maskz_compress_epi8(retain_mask, chunk));
-    (packed_bytes, num_bytes)
-}
-
-fn can_run_other_avx512_16() -> bool {
-    is_x86_feature_detected!("popcnt")
-        && is_x86_feature_detected!("avx512f")
-        && is_x86_feature_detected!("avx512bw")
-        && is_x86_feature_detected!("avx512vbmi")
-        && is_x86_feature_detected!("avx512vbmi2")
-        && is_x86_feature_detected!("avx512vl")
-}
-
-/// use LUT + compress
-#[target_feature(enable = "popcnt,avx512f,avx512vl,avx512vbmi,avx512vbmi2,avx512bw")]
-unsafe fn to_id_other_avx512_16(input: &[u8; 16]) -> ([u8; 16], u8) {
-    let low_lut = _mm512_loadu_si512(ASCII_TABLE.as_ptr().cast());
-    let high_lut = _mm512_loadu_si512(ASCII_TABLE.as_ptr().byte_add(64).cast());
-    // use a 128 byte LUT to map bytes. Nonzero bytes are retained.
-
-    let b = _mm_loadu_si128(input.as_ptr().cast());
-    // which lanes don't have 8th bit set
-    let ascii_mask = !_mm_test_epi8_mask(b, _mm_set1_epi8(-128));
-    // this is a no-op, just for typing
-    let b = _mm512_zextsi128_si512(b);
-    let mapped_bytes = _mm512_permutex2var_epi8(low_lut, b, high_lut);
-    // cast back down to the 16 actual bytes
-    let mapped_bytes = _mm512_castsi512_si128(mapped_bytes);
-    // ignore bytes >= 128 (not ascii), get mask of nonzero bytes
-    let retain_mask = _mm_mask_test_epi8_mask(ascii_mask, mapped_bytes, mapped_bytes) as u16;
-    let packed_bytes = _mm_maskz_compress_epi8(retain_mask, mapped_bytes);
-    (
-        std::mem::transmute(packed_bytes),
-        retain_mask.count_ones() as u8,
-    )
-}
-
 type CompatTestFn = fn() -> bool;
 
 /// Stages of the benchmark. Order dependent
@@ -253,24 +268,31 @@ fn main() {
         bench("scalar match", || true, to_id_match_16, &inputs);
         bench("scalar table-128", || true, to_id_table_16, &inputs);
         bench("scalar table-256", || true, to_id_full_table_16, &inputs);
-        bench(
-            "pext",
-            can_run_pext_16,
-            |v| unsafe { to_id_pext_16(v) },
-            &inputs,
-        );
-        bench(
-            "AVX512 Blend",
-            can_run_avx512_16,
-            |v| unsafe { to_id_avx512_16(v) },
-            &inputs,
-        );
-        bench(
-            "AVX512 LUT",
-            can_run_other_avx512_16,
-            |v| unsafe { to_id_other_avx512_16(v) },
-            &inputs,
-        );
+        #[cfg(target_arch = "x86_64")]
+        {
+            use x86_64::*;
+            bench(
+                "pext",
+                can_run_pext_16,
+                |v| unsafe { to_id_pext_16(v) },
+                &inputs,
+            );
+            #[cfg(feature = "nightly")]
+            {
+                bench(
+                    "AVX512 Blend",
+                    can_run_avx512_16,
+                    |v| unsafe { to_id_avx512_16(v) },
+                    &inputs,
+                );
+                bench(
+                    "AVX512 LUT",
+                    can_run_other_avx512_16,
+                    |v| unsafe { to_id_other_avx512_16(v) },
+                    &inputs,
+                );
+            }
+        }
     }
 }
 
@@ -348,36 +370,39 @@ mod test {
         }
     }
 
+    #[cfg(target_arch = "x86_64")]
     #[test]
     fn test_pext() {
-        if !can_run_pext_16() {
+        if !x86_64::can_run_pext_16() {
             return;
         }
         for (i, o) in TEST_CASES {
-            let (b, _l) = unsafe { to_id_pext_16(i) };
+            let (b, _l) = unsafe { x86_64::to_id_pext_16(i) };
             assert_eq!(*o, b);
         }
     }
 
+    #[cfg(all(feature = "nightly", target_arch = "x86_64"))]
     // naming is hard
     #[test]
     fn test_avx512_first() {
-        if !can_run_avx512_16() {
+        if !x86_64::can_run_avx512_16() {
             return;
         }
         for (i, o) in TEST_CASES {
-            let (b, _l) = unsafe { to_id_avx512_16(i) };
+            let (b, _l) = unsafe { x86_64::to_id_avx512_16(i) };
             assert_eq!(*o, b);
         }
     }
 
+    #[cfg(all(feature = "nightly", target_arch = "x86_64"))]
     #[test]
     fn test_avx512_lut() {
-        if !can_run_other_avx512_16() {
+        if !x86_64::can_run_other_avx512_16() {
             return;
         }
         for (i, o) in TEST_CASES {
-            let (b, _l) = unsafe { to_id_other_avx512_16(i) };
+            let (b, _l) = unsafe { x86_64::to_id_other_avx512_16(i) };
             assert_eq!(*o, b);
         }
     }
