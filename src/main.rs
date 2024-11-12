@@ -276,14 +276,14 @@ fn main() {
             return;
         }
         let start = Instant::now();
-        for chunks in inputs.chunks_exact(out_buf.len()) {
+        for chunks in inputs.chunks_exact(out_buf.len() / (CHUNK_SIZE / 16)) {
             for (in_chunk, out_chunk) in chunks.iter().zip(out_buf.iter_mut()) {
                 out_chunk.write(to_id_fn(in_chunk).0);
             }
             black_box(out_buf);
         }
         let duration = start.elapsed().as_secs_f64();
-        let thrpt = inputs.len() as f64 / duration / 1_000_000.;
+        let thrpt = inputs.len() as f64 / duration / 1_000_000. * (CHUNK_SIZE / 16) as f64;
         println!("{fn_label:<18}: {thrpt:>7.2} M/s");
     }
 
