@@ -155,7 +155,7 @@ mod x86_64 {
     }
 
     #[cfg(feature = "nightly")]
-    pub fn can_run_other_avx512_16() -> bool {
+    pub fn can_run_avx512_lut_16() -> bool {
         is_x86_feature_detected!("popcnt")
             && is_x86_feature_detected!("avx512f")
             && is_x86_feature_detected!("avx512bw")
@@ -167,7 +167,7 @@ mod x86_64 {
     /// use LUT + compress
     #[cfg(feature = "nightly")]
     #[target_feature(enable = "popcnt,avx512f,avx512vl,avx512vbmi,avx512vbmi2,avx512bw")]
-    pub unsafe fn to_id_other_avx512_16(input: &[u8; 16]) -> ([u8; 16], u8) {
+    pub unsafe fn to_id_avx512_lut_16(input: &[u8; 16]) -> ([u8; 16], u8) {
         use crate::ASCII_TABLE;
         let low_lut = _mm512_loadu_si512(ASCII_TABLE.as_ptr().cast());
         let high_lut = _mm512_loadu_si512(ASCII_TABLE.as_ptr().byte_add(64).cast());
@@ -188,6 +188,46 @@ mod x86_64 {
             std::mem::transmute(packed_bytes),
             retain_mask.count_ones() as u8,
         )
+    }
+
+    #[cfg(feature = "nightly")]
+    pub fn can_run_avx512_lut_4x16() -> bool {
+        is_x86_feature_detected!("popcnt")
+            && is_x86_feature_detected!("avx512f")
+            && is_x86_feature_detected!("avx512bitalg")
+            && is_x86_feature_detected!("avx512bw")
+            && is_x86_feature_detected!("avx512vbmi")
+            && is_x86_feature_detected!("avx512vbmi2")
+            && is_x86_feature_detected!("avx512vl")
+            && is_x86_feature_detected!("avx512vpopcntdq")
+    }
+
+    /// LUT but 4 at a time. Returns a dummy u8 because I am a dummy.
+    #[cfg(feature = "nightly")]
+    #[target_feature(enable = "avx512f,avx512vl,avx512vbmi,avx512vbmi2,avx512bw,avx512vpopcntdq,avx512bitalg")]
+    pub unsafe fn to_id_avx512_lut_4x16(inputs: &[u8; 64]) -> ([u8; 64], u8) {
+        use crate::ASCII_TABLE;
+        let low_lut = _mm512_loadu_si512(ASCII_TABLE.as_ptr().cast());
+        let high_lut = _mm512_loadu_si512(ASCII_TABLE.as_ptr().byte_add(64).cast());
+        // use a 128 byte LUT to map bytes. Nonzero bytes are retained.
+
+        let b = _mm512_loadu_si512(inputs.as_ptr().cast());
+        // which lanes don't have 8th bit set
+        let ascii_mask = !_mm512_test_epi8_mask(b, _mm512_set1_epi8(-128));
+        let mapped_bytes = _mm512_permutex2var_epi8(low_lut, b, high_lut);
+        // ignore bytes >= 128 (not ascii), get mask of nonzero bytes
+        let retain_mask = _mm512_mask_test_epi8_mask(ascii_mask, mapped_bytes, mapped_bytes) as u64;
+        // now, this compress clumps all 4 strings together. We'll need to expand them back into
+        // their rightful places
+        let packed_bytes = _mm512_maskz_compress_epi8(retain_mask, mapped_bytes);
+        // we need a bitmask for 4x16 - can compute from popcount of each 16-bit quadrant of retain
+        let retain_v = _mm_set_epi64x(0, retain_mask as i64);
+        let retain_cnt_v = _mm_popcnt_epi16(retain_v);
+        // now turn counts into bitmasks (5 -> 0b1_1111)
+        let masks_v = _mm_sub_epi16(_mm_sllv_epi16(_mm_set1_epi16(1), retain_cnt_v), _mm_set1_epi16(1));
+        let expand_mask = _mm_cvtsi128_si64(masks_v) as u64;
+        let slotted_bytes = _mm512_maskz_expand_epi8(expand_mask, packed_bytes);
+        (std::mem::transmute(slotted_bytes), 0)
     }
 }
 type CompatTestFn = fn() -> bool;
@@ -224,13 +264,13 @@ fn main() {
     use std::{hint::black_box, time::Instant};
 
     #[inline(never)]
-    fn bench(
+    fn bench<const CHUNK_SIZE: usize>(
         fn_label: &str,
         compat_test: CompatTestFn,
-        to_id_fn: impl Fn(&[u8; 16]) -> ([u8; 16], u8),
-        inputs: &[[u8; 16]],
+        to_id_fn: impl Fn(&[u8; CHUNK_SIZE]) -> ([u8; CHUNK_SIZE], u8),
+        inputs: &[[u8; CHUNK_SIZE]],
     ) {
-        let mut out_buf = [std::mem::MaybeUninit::<[u8; 16]>::uninit(); 1000];
+        let mut out_buf = [std::mem::MaybeUninit::<[u8; CHUNK_SIZE]>::uninit(); 1000];
         if !compat_test() {
             println!("--Skipping '{fn_label}' because of missing CPU features");
             return;
@@ -287,9 +327,17 @@ fn main() {
                 );
                 bench(
                     "AVX512 LUT",
-                    can_run_other_avx512_16,
-                    |v| unsafe { to_id_other_avx512_16(v) },
+                    can_run_avx512_lut_16,
+                    |v| unsafe { to_id_avx512_lut_16(v) },
                     &inputs,
+                );
+                // turn slice of 16 into 64
+                let inputs_64 = unsafe { std::slice::from_raw_parts(inputs.as_ptr().cast::<[u8; 64]>(), inputs.len() / 4) };
+                bench(
+                    "AVX512 LUT x 4",
+                    can_run_avx512_lut_4x16,
+                    |v| unsafe { to_id_avx512_lut_4x16(v) },
+                    inputs_64,
                 );
             }
         }
@@ -398,12 +446,35 @@ mod test {
     #[cfg(all(feature = "nightly", target_arch = "x86_64"))]
     #[test]
     fn test_avx512_lut() {
-        if !x86_64::can_run_other_avx512_16() {
+        if !x86_64::can_run_avx512_lut_16() {
             return;
         }
         for (i, o) in TEST_CASES {
-            let (b, _l) = unsafe { x86_64::to_id_other_avx512_16(i) };
+            let (b, _l) = unsafe { x86_64::to_id_avx512_lut_16(i) };
             assert_eq!(*o, b);
+        }
+    }
+
+    #[cfg(all(feature = "nightly", target_arch = "x86_64"))]
+    #[test]
+    fn test_avx512_lut_x4() {
+        if !x86_64::can_run_avx512_lut_4x16() {
+            return;
+        }
+        for cs in TEST_CASES.chunks_exact(4) {
+            let mut i_buf = [0u8; 64];
+            i_buf[..16].copy_from_slice(&cs[0].0);
+            i_buf[16..32].copy_from_slice(&cs[1].0);
+            i_buf[32..48].copy_from_slice(&cs[2].0);
+            i_buf[48..].copy_from_slice(&cs[3].0);
+
+            let mut o_buf = [0u8; 64];
+            o_buf[..16].copy_from_slice(&cs[0].1);
+            o_buf[16..32].copy_from_slice(&cs[1].1);
+            o_buf[32..48].copy_from_slice(&cs[2].1);
+            o_buf[48..].copy_from_slice(&cs[3].1);
+            let (bs, _l) = unsafe { x86_64::to_id_avx512_lut_4x16(&i_buf) };
+            assert_eq!(o_buf, bs);
         }
     }
 }
