@@ -11,8 +11,7 @@ That's the scenario the benchmark tests.
 For the sake of having no dependencies and keeping it within one file, I've compromised on the testing and benchmark code.
 
 # How to use
-I've updated the benchmark to not require x86-64 or nightly, but now in order to enable the AVX512 paths
-you need to pass `--features nightly`.
+Requires Rust 1.89.0 or later.
 
 LLVM won't (or is much less likely to) inline the unsafe fns unless you build with the features enabled.
 Easiest thing is to use the 'native' target. However, sometimes LLVM's metadata is outdated and it won't recognize
@@ -22,11 +21,8 @@ your CPU (it will underestimate its capabilities).
 # not all optimizations will be present
 cargo run --release
 
-# lacks AVX512 paths
+# targets host CPU, non-portable
 RUSTFLAGS="-Ctarget-cpu=native" cargo run --release
-
-# requires nightly toolchain
-RUSTFLAGS="-Ctarget-cpu=native" cargo run --release --features nightly
 ```
 
 or

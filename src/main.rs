@@ -1,12 +1,3 @@
-#![cfg_attr(
-    all(feature = "nightly", target_arch = "x86_64"),
-    feature(avx512_target_feature)
-)]
-#![cfg_attr(
-    all(feature = "nightly", target_arch = "x86_64"),
-    feature(stdarch_x86_avx512)
-)]
-
 // Lowercase + retain [a-z0-9]
 // These don't fully handle unicode - non-ascii bytes will be unconditionally removed (some unicode letters become ascii when lowercased)
 
@@ -134,7 +125,6 @@ mod x86_64 {
         )
     }
 
-    #[cfg(feature = "nightly")]
     pub fn can_run_avx512_16() -> bool {
         is_x86_feature_detected!("popcnt")
             && is_x86_feature_detected!("avx512f")
@@ -143,7 +133,6 @@ mod x86_64 {
             && is_x86_feature_detected!("avx512vl")
     }
 
-    #[cfg(feature = "nightly")]
     #[target_feature(enable = "popcnt,avx512f,avx512bw,avx512vbmi2,avx512vl")]
     pub unsafe fn to_id_avx512_16(input: &[u8; 16]) -> ([u8; 16], u8) {
         let (chunk, retain_mask) =
@@ -154,7 +143,6 @@ mod x86_64 {
         (packed_bytes, num_bytes)
     }
 
-    #[cfg(feature = "nightly")]
     pub fn can_run_other_avx512_16() -> bool {
         is_x86_feature_detected!("popcnt")
             && is_x86_feature_detected!("avx512f")
@@ -165,7 +153,6 @@ mod x86_64 {
     }
 
     /// use LUT + compress
-    #[cfg(feature = "nightly")]
     #[target_feature(enable = "popcnt,avx512f,avx512vl,avx512vbmi,avx512vbmi2,avx512bw")]
     pub unsafe fn to_id_other_avx512_16(input: &[u8; 16]) -> ([u8; 16], u8) {
         use crate::ASCII_TABLE;
@@ -277,21 +264,18 @@ fn main() {
                 |v| unsafe { to_id_pext_16(v) },
                 &inputs,
             );
-            #[cfg(feature = "nightly")]
-            {
-                bench(
-                    "AVX512 Blend",
-                    can_run_avx512_16,
-                    |v| unsafe { to_id_avx512_16(v) },
-                    &inputs,
-                );
-                bench(
-                    "AVX512 LUT",
-                    can_run_other_avx512_16,
-                    |v| unsafe { to_id_other_avx512_16(v) },
-                    &inputs,
-                );
-            }
+            bench(
+                "AVX512 Blend",
+                can_run_avx512_16,
+                |v| unsafe { to_id_avx512_16(v) },
+                &inputs,
+            );
+            bench(
+                "AVX512 LUT",
+                can_run_other_avx512_16,
+                |v| unsafe { to_id_other_avx512_16(v) },
+                &inputs,
+            );
         }
     }
 }
@@ -382,7 +366,7 @@ mod test {
         }
     }
 
-    #[cfg(all(feature = "nightly", target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     // naming is hard
     #[test]
     fn test_avx512_first() {
@@ -395,7 +379,7 @@ mod test {
         }
     }
 
-    #[cfg(all(feature = "nightly", target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     #[test]
     fn test_avx512_lut() {
         if !x86_64::can_run_other_avx512_16() {
